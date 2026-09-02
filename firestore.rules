@@ -1,0 +1,102 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helpers ────────────────────────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && getUserData().role == 'admin';
+    }
+
+    function isApprovedProvider() {
+      return isSignedIn() &&
+             getUserData().role == 'provider' &&
+             getUserData().status == 'approved';
+    }
+
+    // ─── USERS ──────────────────────────────────────────────────────────────
+    match /users/{userId} {
+
+      // Any signed-in user can read any user document.
+      // (Providers need to read student data for applications; Admin needs everything.)
+      allow read: if isSignedIn();
+
+      // First-time profile creation:
+      //   - Must be creating their OWN document
+      //   - role must be 'student' or 'provider' (never 'admin')
+      //   - student → status must be 'active'
+      //   - provider → status must be 'pending'
+      allow create: if isOwner(userId) &&
+                       request.resource.data.role in ['student', 'provider'] &&
+                       (
+                         request.resource.data.role == 'student'
+                           ? request.resource.data.status == 'active'
+                           : request.resource.data.status == 'pending'
+                       );
+
+      // Profile updates:
+      //   - User can update own profile BUT cannot change role or status.
+      //   - Admin can change anything (approvals, rejections, role assignment).
+      allow update: if (
+                      isOwner(userId) &&
+                      request.resource.data.role == resource.data.role &&
+                      request.resource.data.status == resource.data.status
+                    ) || isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // ─── OPPORTUNITIES ───────────────────────────────────────────────────────
+    match /opportunities/{opportunityId} {
+
+      // Anyone authenticated can read opportunities.
+      allow read: if isSignedIn();
+
+      // Only approved providers can create, and only for themselves.
+      allow create: if isApprovedProvider() &&
+                       request.resource.data.providerId == request.auth.uid;
+
+      // Only the creating provider or admin can modify/delete.
+      allow update, delete: if (
+                               isSignedIn() &&
+                               resource.data.providerId == request.auth.uid
+                             ) || isAdmin();
+    }
+
+    // ─── APPLICATIONS ────────────────────────────────────────────────────────
+    match /applications/{applicationId} {
+
+      // Only the applying student, the target provider, or admin can read.
+      allow read: if isSignedIn() && (
+        resource.data.studentId == request.auth.uid ||
+        resource.data.providerId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Students can only create applications for themselves, status must start as 'Applied'.
+      allow create: if isSignedIn() &&
+                       request.resource.data.studentId == request.auth.uid &&
+                       request.resource.data.status == 'Applied';
+
+      // Only the receiving provider or admin can change status.
+      allow update: if isSignedIn() && (
+        resource.data.providerId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow delete: if isAdmin();
+    }
+  }
+}
